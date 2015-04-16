@@ -4,6 +4,7 @@ package com.mixpanel
 	import com.mixpanel.Util;
 	
 	import flash.events.Event;
+	import flash.events.EventDispatcher;
 	import flash.events.IOErrorEvent;
 	import flash.net.URLLoader;
 	import flash.net.URLLoaderDataFormat;
@@ -16,35 +17,42 @@ package com.mixpanel
 	 * <p>Version 2.2.1</p>
 	 */
 	
-	public class Mixpanel
+	public class Mixpanel extends EventDispatcher
 	{
+		
+		// PROPERTIES :
 		private var _:Util;
 		private var token:String;
 		private var disableAllEvents:Boolean = false;
 		private var disabledEvents:Array = [];
-		
-		/**
-		 * @private 
-		 */		
+		/** @private */		
 		internal var storage:Storage;
-		
-		/**
-		 * @private 
-		 */
+		/** @private */
 		internal var config:Object;
-		
 		private var defaultConfig:Object = {
 			crossSubdomainStorage: true,
 			test: false
 		};
+		/** The callback called on request processed or request failed. This property can be set through the constructor, or by calling the <code>setCallback</code> method. */
+		private var callback:Function;
+		/** The request queue. An event is dispatched at each changes on the queue in case you would want to cache it. The queue is processed only if the connection state 
+		 * is set to <code>true</code>. */
+		private var requestQueue:Vector.<MixpanelRequestDescriptor>;
+		/** Whether an internet connection is available or not. Set to true by default, which means the request will be sent directly. It's up to you to update this value
+		 * by calling the <code>setConnectionStatus</code> method from the outside if your app has a connection checking system. */
+		private var connectionAvailable:Boolean = true;
+		/** Whether the request queue is currently processing or not. */
+		private var isProcessing:Boolean = false;
 		
+		
+		// CONSTRUCTOR :
 		/**
 		 * Create an instance of the Mixpanel library 
 		 * 
 		 * @param token your Mixpanel API token
 		 * 
 		 */		
-		public function Mixpanel(token:String)
+		public function Mixpanel(token:String, pendingRequestQueue:Vector.<MixpanelRequestDescriptor> = null, callback:Function = null)
 		{
 			_ = new Util();
 			token = token;
@@ -62,15 +70,58 @@ package com.mixpanel
 			// the user should override this id with identify()
 			// if they want to set their own id
 			this.register_once({ 'distinct_id': _.UUID() }, "");
+			
+			this.callback = callback;
+			this.requestQueue = pendingRequestQueue != null ? pendingRequestQueue : new Vector.<MixpanelRequestDescriptor>();
 		}
 		
-		private function sendRequest(endpoint:String, data:Object, callback:Function=null):Object {			
+		
+		
+		
+		// METHODS :
+		
+		///////////////////
+		// REQUEST QUEUE //
+		///////////////////
+		
+		/**
+		 * Enqueues the given request data as a MixpanelRequestDescriptor object, and tries to process the queue if an internet conection is available.
+		 */
+		private function enqueueRequest(endpoint:String, data:Object):Object {
+			const descriptor:MixpanelRequestDescriptor = MixpanelRequestDescriptor.get(endpoint, _.truncate(data, 255));
+			requestQueue.push(descriptor);
+			
+			dispatchEvent(new MixpanelRequestEvent(MixpanelRequestEvent.QUEUE_UPDATED, requestQueue));
+			
+			processQueue();
+			return descriptor.data;
+		}
+		
+		
+		/**
+		 * Process the request queue, one after another, as they were pushed into the queue. 
+		 */
+		private function processQueue():void {
+			
+			if(!connectionAvailable) return;
+			if(requestQueue.length == 0) return;
+			if(isProcessing) return;
+			
+			isProcessing = true;
+			const descriptor:MixpanelRequestDescriptor = requestQueue[0];
+			sendRequest(descriptor.endPoint, descriptor.data);
+		}
+		
+		
+		/**
+		 * Creates a new request with the given data, and sends it.
+		 */
+		private function sendRequest(endpoint:String, data:Object):void {			
 			var request:URLRequest = new URLRequest(config.apiHost + endpoint);
 			request.method = URLRequestMethod.GET;
 			var params:URLVariables = new URLVariables();
 			
-			var truncatedData:Object = _.truncate(data, 255),
-				jsonData:String = _.jsonEncode(truncatedData),
+			var jsonData:String = _.jsonEncode(data),
 				encodedData:String = _.base64Encode(jsonData);
 			
 			params = _.extend(params, {
@@ -88,9 +139,15 @@ package com.mixpanel
 			loader.dataFormat = URLLoaderDataFormat.TEXT;
 			loader.addEventListener(Event.COMPLETE,
 				function(e:Event):void {
+					// Removes the request that has been processed.
+					requestQueue.shift();
+					dispatchEvent(new MixpanelRequestEvent(MixpanelRequestEvent.QUEUE_UPDATED, requestQueue));
+					
 					if(callback != null) {
 						callback(loader.data);
 					}
+					isProcessing = false;
+					processQueue();
 				});
 			loader.addEventListener(IOErrorEvent.IO_ERROR,
 				function(e:IOErrorEvent):void {
@@ -99,11 +156,11 @@ package com.mixpanel
 					} else if (callback != null) {
 						callback(0);
 					}
+					isProcessing = false;
+					processQueue();
 				});
 			
 			loader.load(request);
-			
-			return truncatedData;
 		}
 		
 		
@@ -120,18 +177,8 @@ package com.mixpanel
 		 */
 		public function track(event:String, ...args):Object
 		{
-			var properties:Object = null, callback:Function = null;
-			
-			if (args.length == 2) {
-				properties = args[0];
-				callback = args[1];
-			} else {
-				if (args[0] is Function) {
-					callback = args[0];
-				} else {
-					properties = args[0];
-				}
-			}
+			var properties:Object = null;
+			properties = args[0];
 			
 
 			properties = properties ? _.extend({}, properties) : {};
@@ -154,7 +201,7 @@ package com.mixpanel
 					ret = callback(0);
 				}
 			} else {
-				ret = sendRequest("track", data, callback);
+				ret = enqueueRequest("track", data);
 			}
 
 			return ret;
@@ -319,7 +366,7 @@ package com.mixpanel
 				"$distinct_id": storage.get("distinct_id")
 			};
 			
-			return sendRequest("engage", data, callback);
+			return enqueueRequest("engage", data);
 		}
 		
 		/**
@@ -369,7 +416,7 @@ package com.mixpanel
 				"$distinct_id": storage.get("distinct_id")
 			};
 			
-			return sendRequest("engage", data, callback);
+			return enqueueRequest("engage", data);
 		}
 		
 		/**
@@ -402,7 +449,7 @@ package com.mixpanel
 				"$distinct_id": storage.get("distinct_id")
 			};
 			
-			return sendRequest("engage", data, callback);
+			return enqueueRequest("engage", data);
 		}
 		
 		/**
@@ -425,7 +472,7 @@ package com.mixpanel
 				"$distinct_id": storage.get("distinct_id")
 			};
 			
-			return sendRequest("engage", data, callback);
+			return enqueueRequest("engage", data);
 		}
 		
 		/**
@@ -450,7 +497,7 @@ package com.mixpanel
 				"$distinct_id": storage.get("distinct_id")
 			};
 			
-			return sendRequest("engage", data, callback);
+			return enqueueRequest("engage", data);
 		}
 
 		/**
@@ -483,6 +530,33 @@ package com.mixpanel
 				storage.updateCrossDomain(config.crossSubdomainStorage);
 			}
 			_.extend(this.config, config);
+		}
+		
+		
+		
+		
+		
+		////////////
+		// PARAMS //
+		////////////
+		
+		/**
+		 * Sets the given function as the callback used on a request response.
+		 */
+		public function setCallback(callback:Function):void {
+			this.callback = callback;
+		}
+		
+		/**
+		 * Sets the given connection status as the current connection status. If set to false, the requests will not be sent, only enqueued.
+		 * When set to true, it will process the request queue if it is not empty.
+		 */
+		public function setConnectionStatus(available:Boolean):void {
+			if(connectionAvailable == available)
+				return;
+			
+			this.connectionAvailable = available;
+			processQueue();
 		}
 	}
 }
