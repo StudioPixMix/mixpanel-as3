@@ -1,8 +1,5 @@
 package com.mixpanel
 {
-	import com.mixpanel.Storage;
-	import com.mixpanel.Util;
-	
 	import flash.events.Event;
 	import flash.events.EventDispatcher;
 	import flash.events.IOErrorEvent;
@@ -43,8 +40,10 @@ package com.mixpanel
 		private var connectionAvailable:Boolean = true;
 		/** Whether the request queue is currently processing or not. */
 		private var isProcessing:Boolean = false;
-		/** The log method to use. If defined, this method must take a String as argument. */
-		private var logMethod:Function;
+		/** The log method for info level logging. */
+		private var infoLogger:Function;
+		/** The log method for debugging. */
+		private var debugLogger:Function;
 		
 		
 		
@@ -76,7 +75,7 @@ package com.mixpanel
 			
 			this.callback = callback;
 			this.requestQueue = pendingRequestQueue != null ? pendingRequestQueue : new Vector.<MixpanelRequestDescriptor>();
-			log("Mixpanel request queue initialized (" + requestQueue.length + " requests pending).");
+			logInfo("Mixpanel request queue initialized (" + requestQueue.length + " requests pending).");
 		}
 		
 		
@@ -92,7 +91,7 @@ package com.mixpanel
 		 * Enqueues the given request data as a MixpanelRequestDescriptor object, and tries to process the queue if an internet conection is available.
 		 */
 		private function enqueueRequest(endpoint:String, data:Object):Object {
-			log("Enqueuing a new request for end point " + endpoint + ".");
+			logDebug("Enqueuing a new request for end point " + endpoint + (data != null && data.hasOwnProperty("event") ? " (" + data["event"] + ")" : "") + ".");
 			const descriptor:MixpanelRequestDescriptor = MixpanelRequestDescriptor.get(endpoint, util.truncate(data, 255));
 			requestQueue.push(descriptor);
 			
@@ -107,18 +106,18 @@ package com.mixpanel
 		 * Process the request queue, one after another, as they were pushed into the queue. 
 		 */
 		private function processQueue():void {
-			log("Processing Mixpanel queue ...");
+			logDebug("Processing Mixpanel queue ...");
 			
 			if(!connectionAvailable) {
-				log("No connection available, aborting ...");
+				logDebug("No connection available, aborting ...");
 				return;
 			}
 			if(requestQueue.length == 0) {
-				log("The request queue is empty. Aborting ...");
+				logDebug("The request queue is empty. Aborting ...");
 				return;
 			}
 			if(isProcessing) {
-				log("The request queue is alreadu being processed, aborting ...");
+				logDebug("The request queue is already being processed, aborting ...");
 				return;
 			}
 			
@@ -132,7 +131,7 @@ package com.mixpanel
 		 * Creates a new request with the given data, and sends it.
 		 */
 		private function sendRequest(endpoint:String, data:Object):void {
-			log("Sending a Mixpanel request ...");
+			logDebug("Sending a Mixpanel request : " + endpoint + (data != null && data.hasOwnProperty("event") ? " (" + data["event"] + ")" : "") + " ...");
 			var request:URLRequest = new URLRequest(config.apiHost + endpoint);
 			request.method = URLRequestMethod.GET;
 			var params:URLVariables = new URLVariables();
@@ -149,38 +148,42 @@ package com.mixpanel
 			if (config["verbose"]) { params["verbose"] = 1; }
 			if (config["request_method"]) { request.method = config["request_method"]; }
 			
-			log("Sending request with url " + request.url + " and params : " + params);
+			logDebug("Sending request with url " + request.url + " and params : " + params);
 			
 			request.data = params;
 			
 			var loader:URLLoader = new URLLoader();
 			loader.dataFormat = URLLoaderDataFormat.TEXT;
-			loader.addEventListener(Event.COMPLETE,
-				function(e:Event):void {
-					log("The request succeeded. Removing it from the queue ...");
-					
-					// Removes the request that has been processed.
-					requestQueue.shift();
-					dispatchEvent(new MixpanelRequestEvent(MixpanelRequestEvent.QUEUE_UPDATED, requestQueue));
-					
-					if(callback != null) {
-						callback(loader.data);
-					}
-					isProcessing = false;
-					log("Done. Continuing processing ...");
-					processQueue();
-				});
-			loader.addEventListener(IOErrorEvent.IO_ERROR,
-				function(e:IOErrorEvent):void {
-					
-					log("The request failed : " + e);
-					log("Retrying ...");
-					
-					isProcessing = false;
-					processQueue();
-				});
-			
+			loader.addEventListener(Event.COMPLETE, onComplete);
+			loader.addEventListener(IOErrorEvent.IO_ERROR, onError);
 			loader.load(request);
+			
+			function onComplete(e:Event):void {
+				loader.removeEventListener(Event.COMPLETE, onComplete);
+				loader.removeEventListener(IOErrorEvent.IO_ERROR, onError);
+				
+				logInfo("Mixpanel request complete : " + endpoint + (data != null && data.hasOwnProperty("event") ? " -> " + data["event"] : ""));
+				
+				// Removes the request that has been processed.
+				requestQueue.shift();
+				dispatchEvent(new MixpanelRequestEvent(MixpanelRequestEvent.QUEUE_UPDATED, requestQueue));
+				
+				if(callback != null) 
+					callback(loader.data);
+				
+				isProcessing = false;
+				logDebug("Done. Continuing processing ...");
+				processQueue();
+			};
+			
+			function onError(e:IOErrorEvent):void {
+				loader.removeEventListener(Event.COMPLETE, onComplete);
+				loader.removeEventListener(IOErrorEvent.IO_ERROR, onError);
+				
+				logInfo("Mixpanel request failed : " + endpoint + (data != null && data.hasOwnProperty("event") ? " -> " + data["event"] : "") + ".\nError : " + e + "\n\t-> Retrying ...");
+				isProcessing = false;
+				processQueue();
+			};
 		}
 		
 		
@@ -580,10 +583,14 @@ package com.mixpanel
 		}
 		
 		/**
-		 * Sets the log method to use. The given method must take a String message as parameter.
+		 * Sets the log method to use.
+		 * 
+		 * @param infoLogger	Expected signature : function(message:String):void
+		 * @param debugLogger	Expected signature : function(message:String):void
 		 */
-		public function setLogMethod(method:Function):void {
-			this.logMethod = method;
+		public function setLoggers(infoLogger:Function, debugLogger:Function):void {
+			this.infoLogger = infoLogger;
+			this.debugLogger = debugLogger;
 		}
 		
 		
@@ -595,9 +602,17 @@ package com.mixpanel
 		/**
 		 * Logs the given string, if the log method is defined.
 		 */
-		private function log(message:String):void {
-			if(logMethod != null)
-				logMethod(message);
+		private function logInfo(message:String):void {
+			if(infoLogger != null)
+				infoLogger(message);
+		}
+		
+		/**
+		 * Logs the given string, if the log method is defined.
+		 */
+		private function logDebug(message:String):void {
+			if(debugLogger != null)
+				debugLogger(message);
 		}
 	}
 }
