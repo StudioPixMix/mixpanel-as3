@@ -21,7 +21,7 @@ package com.mixpanel
 	{
 		
 		// PROPERTIES :
-		private var _:Util;
+		private var util:Util;
 		private var token:String;
 		private var disableAllEvents:Boolean = false;
 		private var disabledEvents:Array = [];
@@ -43,6 +43,9 @@ package com.mixpanel
 		private var connectionAvailable:Boolean = true;
 		/** Whether the request queue is currently processing or not. */
 		private var isProcessing:Boolean = false;
+		/** The log method to use. If defined, this method must take a String as argument. */
+		private var logMethod:Function;
+		
 		
 		
 		// CONSTRUCTOR :
@@ -54,11 +57,11 @@ package com.mixpanel
 		 */		
 		public function Mixpanel(token:String, pendingRequestQueue:Vector.<MixpanelRequestDescriptor> = null, callback:Function = null)
 		{
-			_ = new Util();
+			util = new Util();
 			token = token;
-			var protocol:String = _.browserProtocol();
+			var protocol:String = util.browserProtocol();
 			
-			config = _.extend({}, defaultConfig, {
+			config = util.extend({}, defaultConfig, {
 				apiHost: protocol + '//api.mixpanel.com/',
 				storageName: "mp_" + token,
 				token: token
@@ -69,10 +72,11 @@ package com.mixpanel
 			// generate a distinct_id at instance creation
 			// the user should override this id with identify()
 			// if they want to set their own id
-			this.register_once({ 'distinct_id': _.UUID() }, "");
+			this.register_once({ 'distinct_id': util.UUID() }, "");
 			
 			this.callback = callback;
 			this.requestQueue = pendingRequestQueue != null ? pendingRequestQueue : new Vector.<MixpanelRequestDescriptor>();
+			log("Mixpanel request queue initialized (" + requestQueue.length + " requests pending).");
 		}
 		
 		
@@ -88,7 +92,8 @@ package com.mixpanel
 		 * Enqueues the given request data as a MixpanelRequestDescriptor object, and tries to process the queue if an internet conection is available.
 		 */
 		private function enqueueRequest(endpoint:String, data:Object):Object {
-			const descriptor:MixpanelRequestDescriptor = MixpanelRequestDescriptor.get(endpoint, _.truncate(data, 255));
+			log("Enqueuing a new request for end point " + endpoint + ".");
+			const descriptor:MixpanelRequestDescriptor = MixpanelRequestDescriptor.get(endpoint, util.truncate(data, 255));
 			requestQueue.push(descriptor);
 			
 			dispatchEvent(new MixpanelRequestEvent(MixpanelRequestEvent.QUEUE_UPDATED, requestQueue));
@@ -102,10 +107,20 @@ package com.mixpanel
 		 * Process the request queue, one after another, as they were pushed into the queue. 
 		 */
 		private function processQueue():void {
+			log("Processing Mixpanel queue ...");
 			
-			if(!connectionAvailable) return;
-			if(requestQueue.length == 0) return;
-			if(isProcessing) return;
+			if(!connectionAvailable) {
+				log("No connection available, aborting ...");
+				return;
+			}
+			if(requestQueue.length == 0) {
+				log("The request queue is empty. Aborting ...");
+				return;
+			}
+			if(isProcessing) {
+				log("The request queue is alreadu being processed, aborting ...");
+				return;
+			}
 			
 			isProcessing = true;
 			const descriptor:MixpanelRequestDescriptor = requestQueue[0];
@@ -116,15 +131,16 @@ package com.mixpanel
 		/**
 		 * Creates a new request with the given data, and sends it.
 		 */
-		private function sendRequest(endpoint:String, data:Object):void {			
+		private function sendRequest(endpoint:String, data:Object):void {
+			log("Sending a Mixpanel request ...");
 			var request:URLRequest = new URLRequest(config.apiHost + endpoint);
 			request.method = URLRequestMethod.GET;
 			var params:URLVariables = new URLVariables();
 			
-			var jsonData:String = _.jsonEncode(data),
-				encodedData:String = _.base64Encode(jsonData);
+			var jsonData:String = util.jsonEncode(data),
+				encodedData:String = util.base64Encode(jsonData);
 			
-			params = _.extend(params, {
+			params = util.extend(params, {
 				_: new Date().time.toString(),
 				data: encodedData,
 				ip: 1
@@ -133,12 +149,16 @@ package com.mixpanel
 			if (config["verbose"]) { params["verbose"] = 1; }
 			if (config["request_method"]) { request.method = config["request_method"]; }
 			
+			log("Sending request with url " + request.url + " and params : " + params);
+			
 			request.data = params;
 			
 			var loader:URLLoader = new URLLoader();
 			loader.dataFormat = URLLoaderDataFormat.TEXT;
 			loader.addEventListener(Event.COMPLETE,
 				function(e:Event):void {
+					log("The request succeeded. Removing it from the queue ...");
+					
 					// Removes the request that has been processed.
 					requestQueue.shift();
 					dispatchEvent(new MixpanelRequestEvent(MixpanelRequestEvent.QUEUE_UPDATED, requestQueue));
@@ -147,15 +167,15 @@ package com.mixpanel
 						callback(loader.data);
 					}
 					isProcessing = false;
+					log("Done. Continuing processing ...");
 					processQueue();
 				});
 			loader.addEventListener(IOErrorEvent.IO_ERROR,
 				function(e:IOErrorEvent):void {
-					if ((callback != null) && config["verbose"]) {
-						callback('{"status":0,"error":"' + e.text + '"}');
-					} else if (callback != null) {
-						callback(0);
-					}
+					
+					log("The request failed : " + e);
+					log("Retrying ...");
+					
 					isProcessing = false;
 					processQueue();
 				});
@@ -181,7 +201,7 @@ package com.mixpanel
 			properties = args[0];
 			
 
-			properties = properties ? _.extend({}, properties) : {};
+			properties = properties ? util.extend({}, properties) : {};
 
 			if (!properties["token"]) { properties.token = config.token; }
 			properties["mp_lib"] = "as3";
@@ -358,7 +378,7 @@ package com.mixpanel
 				callback = args[args.length-1];
 			}
 			
-			$set = $set ? _.extend({}, $set) : {};
+			$set = $set ? util.extend({}, $set) : {};
 			
 			var data:Object = {
 				"$set": $set,
@@ -529,7 +549,7 @@ package com.mixpanel
 			if (config["crossSubdomainStorage"] && config.crossSubdomainStorage != this.config.crossSubdomainStorage) {
 				storage.updateCrossDomain(config.crossSubdomainStorage);
 			}
-			_.extend(this.config, config);
+			util.extend(this.config, config);
 		}
 		
 		
@@ -557,6 +577,27 @@ package com.mixpanel
 			
 			this.connectionAvailable = available;
 			processQueue();
+		}
+		
+		/**
+		 * Sets the log method to use. The given method must take a String message as parameter.
+		 */
+		public function setLogMethod(method:Function):void {
+			this.logMethod = method;
+		}
+		
+		
+		
+		/////////////
+		// HELPERS //
+		/////////////
+		
+		/**
+		 * Logs the given string, if the log method is defined.
+		 */
+		private function log(message:String):void {
+			if(logMethod != null)
+				logMethod(message);
 		}
 	}
 }
